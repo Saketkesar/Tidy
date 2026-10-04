@@ -83,9 +83,19 @@ Turbocharge file downloads with parallel multi-part chunking! Includes a visual 
 ## 📥 Installation
 
 ### Option 1: Direct Download (DMG)
-1. Download the latest **`Tidy.app`** or **`Tidy.dmg`** from the [GitHub Releases](https://github.com/Saketkesar/Tidy/releases) page.
-2. Drag `Tidy.app` into your `/Applications` folder.
+1. Download the latest **`Tidy-v1.2.0.dmg`** from the [GitHub Releases](https://github.com/Saketkesar/Tidy/releases) page.
+2. Open the disk image and drag **`Tidy.app`** into your `/Applications` folder.
 3. Open Tidy and enjoy!
+
+> [!NOTE]
+> **First-Time Launch on macOS (Gatekeeper)**:  
+> Because Tidy is a free open-source project and not sold through the Mac App Store, macOS may show a prompt saying *"Apple could not verify Tidy..."*. This is standard Apple Gatekeeper behavior for downloaded independent apps.  
+> 
+> **To open Tidy (one-time approval):**
+> 1. Open **System Settings** → **Privacy & Security**.
+> 2. Scroll down to the **Security** section and click **"Open Anyway"**.
+> 3. Click **"Open"** when prompted.  
+> *(Alternatively, run `xattr -cr /Applications/Tidy.app` in Terminal).*
 
 ### Option 2: Build From Source
 Clone the repository and run the build script:
