@@ -8,11 +8,13 @@
 
 [![Swift 5.9](https://img.shields.io/badge/Swift-5.9+-FA7343?style=for-the-badge&logo=swift&logoColor=white)](https://swift.org)
 [![macOS 13.0+](https://img.shields.io/badge/macOS-13.0%2B-000000?style=for-the-badge&logo=apple&logoColor=white)](https://apple.com/macos)
+[![Website](https://img.shields.io/badge/Website-tidyformac.vercel.app-FF477E?style=for-the-badge&logo=safari&logoColor=white)](https://tidyformac.vercel.app)
+[![Visual Guide](https://img.shields.io/badge/Visual_Guide-Open_Tidy-3B82F6?style=for-the-badge&logo=apple&logoColor=white)](https://tidyformac.vercel.app/install-guide/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-E879F9?style=for-the-badge)](LICENSE)
 [![Privacy: 100% Offline](https://img.shields.io/badge/Privacy-100%25%20Offline-10B981?style=for-the-badge)](https://github.com/Saketkesar/Tidy)
 [![Developer: Saket Kesar](https://img.shields.io/badge/Dev-Saket%20Kesar-F43F5E?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Saketkesar)
 
-[Features](#-key-features) • [Icon Packs](#-icon-packs--customization) • [Installation](#-installation) • [Auto-Updates](#-auto-updates) • [Contact](#-developer--contact)
+🌐 **[Official Website](https://tidyformac.vercel.app)** • 📖 **[Visual Install Guide](https://tidyformac.vercel.app/install-guide/)** • [Features](#-key-features) • [Installation](#-installation) • [Contact](#-developer--contact)
 
 </div>
 
@@ -82,8 +84,11 @@ Turbocharge file downloads with parallel multi-part chunking! Includes a visual 
 
 ## 📥 Installation
 
+> [!TIP]
+> 📖 **Need visual help?** Check out our step-by-step cartoon guide with screenshots: **[Visual First-Time Open Guide (7 Easy Steps)](https://tidyformac.vercel.app/install-guide/)**!
+
 ### Option 1: Direct Download (DMG)
-1. Download the latest **`Tidy-v1.2.0.dmg`** from the [GitHub Releases](https://github.com/Saketkesar/Tidy/releases) page.
+1. Download the latest **`Tidy-v1.2.0.dmg`** from the [GitHub Releases](https://github.com/Saketkesar/Tidy/releases) page or [Official Website](https://tidyformac.vercel.app).
 2. Open the disk image and drag **`Tidy.app`** into your `/Applications` folder.
 3. Open Tidy and enjoy!
 
@@ -95,7 +100,7 @@ Turbocharge file downloads with parallel multi-part chunking! Includes a visual 
 > 1. Open **System Settings** → **Privacy & Security**.
 > 2. Scroll down to the **Security** section and click **"Open Anyway"**.
 > 3. Click **"Open"** when prompted.  
-> *(Alternatively, run `xattr -cr /Applications/Tidy.app` in Terminal).*
+> *(Follow the [Visual Guide](https://tidyformac.vercel.app/install-guide/) or run `xattr -cr /Applications/Tidy.app` in Terminal).*
 
 ### Option 2: Build From Source
 Clone the repository and run the build script:
