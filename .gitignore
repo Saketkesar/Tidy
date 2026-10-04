@@ -1,0 +1,32 @@
+# Xcode & Swift Package Manager
+.build/
+Packages/
+xcuserdata/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+*.resolved
+
+# Build Artifacts & Distribution
+dist/
+*.o
+*.dylib
+*.app
+*.dmg
+
+# OS & Environment
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor & Scratch
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+scratch/

@@ -1,0 +1,366 @@
+================================================================================
+TIDY  -  DOWNLOAD MANAGER MODULE  (like IDM / FDM, but native, cute, smarter)
+Wireframe + Workflow + Engine Spec
+================================================================================
+
+NOTE TO THE AI BUILDING THIS
+This is a NEW module inside the existing Tidy app (SwiftUI, macOS 13+, non-sandboxed,
+Developer ID). Reuse Tidy's existing design system, icons, mascot animations,
+Downloads Organizer, safety layer and History. Read sections 1 and 2 first.
+
+--------------------------------------------------------------------------------
+1. HARD RULES
+--------------------------------------------------------------------------------
+R1  NO DUMMY DATA. Every speed, ETA, byte count, percentage, segment state, file
+    name and size shown must come from the real transfer at runtime. No fake
+    progress, no placeholder rows, no hardcoded sample downloads. Empty state =
+    real empty state.
+R2  Progress = real bytes written / real total (or indeterminate if the server
+    sends no length). Speed = rolling average over the last ~3 seconds of real bytes.
+    ETA = remaining bytes / current speed (show "--" if speed is 0 or unknown).
+R3  Never disable TLS validation. Never accept invalid certificates silently.
+R4  Keep the macOS quarantine attribute (com.apple.quarantine) on every completed
+    file so Gatekeeper still protects the user. Never strip it. Never auto-open or
+    auto-execute a downloaded file unless the user explicitly clicks Open.
+R5  Sanitize every server-provided filename: strip path separators and ".." ,
+    control characters, leading dots-only names, and limit length. Never write
+    outside the chosen destination folder (resolve symlinks and verify the final
+    path is inside the destination).
+R6  Respect the user's data: no analytics containing URLs, file names or cookies.
+    Nothing leaves the device except the download traffic itself.
+R7  Check free disk space BEFORE starting (Content-Length known) and while running;
+    pause with a clear message if space runs out. Use the real volume capacity APIs.
+R8  Cookies / auth headers captured from the browser are stored in memory or in the
+    Keychain only, never written to plain files or logs, and cleared when the
+    download finishes.
+R9  Only support content the user is allowed to download. Do NOT implement DRM
+    circumvention. Video grabbing (section 8) is optional, uses yt-dlp as an
+    external tool, and shows a notice that the user is responsible for respecting
+    site terms and copyright.
+
+--------------------------------------------------------------------------------
+2. WHAT MAKES IT BETTER THAN IDM / FDM
+--------------------------------------------------------------------------------
+- Native SwiftUI Mac app: no ugly Java/Qt look, proper dark mode, trackpad feel,
+  Notification Center, Shortcuts, menu bar mini player.
+- "Chunk bar": the progress bar shows every parallel segment filling live in
+  different pastel colors. It is both the real progress indicator and the signature
+  look of the app.
+- Finished downloads are auto-sorted by Tidy's Downloads Organizer rules
+  (Images, Docs, Video, Code, Archives, Installers...). IDM/FDM only dump into one
+  folder.
+- Smart duplicate guard: before downloading, check if the same file name + size
+  (or the same SHA-256 once finished) already exists in Downloads and ask what to do.
+- Built-in integrity check: paste an expected SHA-256 / SHA-1 / MD5 (or let Tidy
+  read it from a ".sha256" sibling link) and it verifies after download with a
+  green "verified" badge or a red "mismatch" warning.
+- Resumes after: app quit, crash, sleep, Wi-Fi change, VPN switch, reboot.
+- Keeps the Mac awake while downloading (IOPMAssertion), releases it when done.
+- Clipboard watcher: copy a link, a cute toast offers "Download with Tidy?".
+- Real mascot reactions: the folder buddy eats the file when it completes.
+
+--------------------------------------------------------------------------------
+3. FEATURE LIST (SCOPED)
+--------------------------------------------------------------------------------
+MVP (build first):
+  - HTTP/HTTPS downloads, segmented multi-connection (1 to 16 connections)
+  - Pause / resume / cancel / retry, crash-safe resume
+  - Queue with max simultaneous downloads (default 3)
+  - Add by paste, drag-and-drop link/text, or "Add URL" button
+  - Per-download folder + category, completion actions
+  - Speed + ETA + chunk bar + sparkline
+  - Menu bar mini popover
+  - Integration with Downloads Organizer and History
+V2:
+  - Browser extensions (Safari, Chrome, Firefox, Edge) capture clicks and send the
+    URL + cookies + referrer to Tidy
+  - Clipboard watcher, batch links (paste a list, or a pattern like file[01-20].zip)
+  - Speed limiter (global + per download), scheduler (start/stop times, days)
+  - Proxy support (system proxy default, custom HTTP/SOCKS5)
+  - Checksum verification, duplicate guard
+V3 (optional):
+  - Video/audio grabber via yt-dlp (user installs or Tidy downloads the official
+    binary after consent)
+  - Torrent/magnet via libtorrent
+  - FTP/SFTP
+  - Shortcuts actions, Siri, CLI ("tidy-dl <url>")
+
+--------------------------------------------------------------------------------
+4. ENGINE DESIGN (the important technical part)
+--------------------------------------------------------------------------------
+Stack: Swift concurrency + URLSession (background-capable data tasks per segment).
+Do NOT rely on a single URLSessionDownloadTask: segmented downloads need Range
+requests, written straight into a pre-allocated file.
+
+4.1 Probe phase (HEAD, fall back to GET with Range: bytes=0-0)
+  - Follow redirects (limit 10), keep the final URL, read: Content-Length,
+    Accept-Ranges, ETag, Last-Modified, Content-Type, Content-Disposition (filename).
+  - If Accept-Ranges: bytes and Content-Length known -> segmented mode.
+  - Otherwise -> single connection mode (still pause/resume only if server allows;
+    show an honest note "This server does not allow resuming").
+4.2 Segmenting
+  - Choose N = user setting (default 8), but never more than ceil(size / 1 MB),
+    minimum 1. Small files (< 2 MB) use 1 connection.
+  - Split [0, size-1] into N ranges. Each segment keeps: index, start, end,
+    downloadedBytes, state.
+  - Dynamic re-splitting: when a segment finishes early, split the largest
+    remaining segment in two and give the second half to the idle connection.
+4.3 Writing
+  - Pre-allocate the final-size file as "<name>.tidypart" in the destination (use
+    ftruncate). Each segment writes with pwrite at its own offset (FileHandle /
+    POSIX). Flush periodically.
+  - Persist the segment table (SQLite/JSON) every ~1 s and on pause/quit. This is
+    what makes resume crash-safe.
+4.4 Resume
+  - Reload segment table, send Range: bytes=<start+downloaded>-<end> with
+    If-Range: <ETag or Last-Modified>. If the server returns 200 instead of 206 or
+    validators changed, the file changed: tell the user and restart that download.
+4.5 Completion
+  - When all segments hit their end byte: verify total size, run optional checksum,
+    rename ".tidypart" to the final name (resolve name collisions with " (2)"),
+    keep quarantine attribute, log to History, then apply completion actions
+    (section 6.4).
+4.6 Retry / errors
+  - Per-segment retry with exponential backoff (1s, 2s, 4s... max 30s, 8 tries).
+  - Network lost: pause automatically, resume when reachability returns
+    (NWPathMonitor).
+  - HTTP 403/401: ask for credentials or tell the user the link expired.
+  - HTTP 429/503: respect Retry-After and reduce connection count.
+4.7 Limits
+  - Global speed limiter: token bucket shared across all segments.
+  - Per-download limiter.
+  - Max simultaneous downloads and max connections per host (default 8) to be a
+    good citizen.
+4.8 Power
+  - IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep) while
+    at least one download is active. Release when none are.
+
+--------------------------------------------------------------------------------
+5. DATA MODEL (persisted locally)
+--------------------------------------------------------------------------------
+Download:   id, url, finalURL, fileName, destinationFolder, category, totalBytes?,
+            downloadedBytes, state (queued | probing | downloading | paused |
+            verifying | completed | failed | cancelled), error?, createdAt,
+            startedAt?, completedAt?, connections, speedLimit?, checksumExpected?,
+            checksumResult?, etag?, lastModified?, referrer?, mimeType?
+Segment:    downloadId, index, start, end, downloadedBytes, state
+Settings:   defaultFolder, maxSimultaneous, defaultConnections, globalSpeedLimit?,
+            scheduler rules, proxy, categories + folders, clipboardWatch, sounds,
+            completionDefaults
+History:    reuse Tidy History log (type "download", file name, size, destination,
+            time, final path, checksum result)
+Never store cookies in this database.
+
+--------------------------------------------------------------------------------
+6. SCREENS & WIREFRAMES
+--------------------------------------------------------------------------------
+Legend: [ Button ]  {real value}  ~~~ = chunk bar  ... = more rows
+Sidebar: add a new item "Downloads" (cute download icon from the icon pack) in the
+section "ORGANIZE & APPS", above or below Downloads Organizer. Badge shows the
+real number of active downloads.
+
+6.1 DOWNLOADS (main screen)
++----------------------------------------------------------------------------+
+|  Downloads                          [ Search ]      [ + Add URL ]  [ Pause all ]|
+|----------------------------------------------------------------------------|
+|  Active {n}   Queued {n}   Completed {n}   Failed {n}      (filter chips)  |
+|                                                                            |
+|  +----------------------------------------------------------------------+  |
+|  | {file icon}  {file name}                                  [II] [x]   |  |
+|  |              {host}  .  {size done} of {total}  .  {category chip}   |  |
+|  |  ~~~~~~~~~~ chunk bar: one colored piece per live segment ~~~~~~~~~  |  |
+|  |  {speed}/s   {sparkline of last 30 s}        ETA {time}    {pct}%     |  |
+|  +----------------------------------------------------------------------+  |
+|  +----------------------------------------------------------------------+  |
+|  | Queued row: name, size, "Waiting - position {n}"        [ Start now ]|  |
+|  +----------------------------------------------------------------------+  |
+|  +----------------------------------------------------------------------+  |
+|  | Completed row: name, size, time, {verified badge}   [ Reveal ] [ Open ]|  |
+|  +----------------------------------------------------------------------+  |
+|                                                                            |
+|  Bottom bar:  Total speed {sum}/s    {n} active    Disk free {real free}   |
++----------------------------------------------------------------------------+
+Rules:
+- Rows sorted: active first, then queued, then recent completed.
+- Row context menu: Pause/Resume, Retry, Cancel, Copy link, Open in browser,
+  Reveal in Finder, Move to category, Remove from list, Delete file (to Trash).
+- Chunk bar: segments drawn as adjacent rounded pieces, each filling left to right
+  with its own pastel color; the finished area turns solid pink-mint. It must
+  reflect the REAL segment table.
+- Multi-select + keyboard shortcuts: Space pause/resume, Cmd+N add, Cmd+Delete remove.
+- EMPTY STATE: mascot (sleepy folder) + "Nothing downloading" + [ + Add URL ].
+
+6.2 ADD DOWNLOAD SHEET
++------------------------------------------------------+
+|  Add download                                        |
+|  URL    [ paste or drop a link here ................ ]|
+|         (multiple links: one per line)               |
+|                                                      |
+|  After probing (real data):                          |
+|  {file icon} {file name}                             |
+|  {size}  .  {host}  .  {Resumable: yes/no}           |
+|                                                      |
+|  Save to   [ ~/Downloads/Sorted/{auto category} v ]  |
+|  Category  ( Auto ) ( Images ) ( Docs ) ... custom   |
+|  Connections  [----o----]  {1..16}                   |
+|  Speed limit  [ none v ]    Checksum [ optional ]    |
+|  [x] Start immediately   [ ] Add to schedule         |
+|                                                      |
+|  Disk check: {enough space / not enough space}       |
+|                         [ Cancel ]  [ Download ]     |
++------------------------------------------------------+
+Rules: probing shows a spinner then real values. If the file already exists
+(same name+size) show the duplicate guard: [ Skip ] [ Download anyway ] [ Replace ].
+
+6.3 MENU BAR MINI (popover on the tray icon, shows only while downloads exist)
++------------------------------------+
+|  Tidy downloads                    |
+|  {file name}     {pct}%   {speed}/s|
+|  ~~~~ mini chunk bar ~~~~          |
+|  {file name 2}   queued            |
+|  Total {sum speed}/s               |
+|  [ Pause all ]   [ Open Tidy ]     |
++------------------------------------+
+The tray icon plays the scanning animation frames while any download is active
+(reuse the animated tray icon, same rules: respect Reduce Motion).
+
+6.4 COMPLETION BEHAVIOR (per-user settings)
+  - Notification: "{file name} finished" with [ Reveal ] [ Open ]
+  - Move to category folder using Downloads Organizer rules (default ON)
+  - Verify checksum if provided
+  - Optional sound; optional mascot toast (folder eats the file, sparkles)
+  - Optional "Scan before opening" is NOT a fake scan: it only shows hash +
+    quarantine + code signature status (codesign/spctl assessment) for apps/pkgs.
+
+6.5 SCHEDULER (V2)
++--------------------------------------------------------+
+|  Schedule                                              |
+|  [x] Only download between [ 01:00 ] and [ 07:00 ]     |
+|  Days  M T W T F S S                                   |
+|  When finished: ( nothing ) ( sleep Mac ) ( quit Tidy ) |
+|  Speed limit during schedule  [ none v ]               |
++--------------------------------------------------------+
+"Sleep Mac" must show a confirmation countdown the user can cancel.
+
+6.6 BATCH ADD (V2)
+  - Paste a list of links, or a pattern: https://site/file[01-20].zip
+  - Preview of the real expanded URL list before adding.
+
+6.7 SETTINGS (Downloads section)
+  Default folder, categories and folders, max simultaneous (1-10),
+  default connections (1-16), global speed limit, proxy (system / custom),
+  clipboard watcher on/off, sounds, completion defaults, "launch at login".
+
+6.8 BROWSER CAPTURE TOAST (V2)
+  Small floating card near the menu bar when the extension hands Tidy a link:
+  "{file name} {size}   [ Download ] [ Ignore ]   (auto-download option in settings)".
+
+--------------------------------------------------------------------------------
+7. WORKFLOWS
+--------------------------------------------------------------------------------
+7.1 ADD AND DOWNLOAD
+  User pastes URL -> validate (http/https only) -> probe (HEAD/Range) -> show real
+  name/size/resumable -> disk-space check -> duplicate guard -> user confirms ->
+  create Download row (queued) -> queue scheduler starts it when a slot is free ->
+  segments run in parallel -> chunk bar fills from real bytes -> complete.
+7.2 PAUSE / RESUME
+  Pause: cancel segment tasks, flush file, persist segment table, state=paused.
+  Resume: reload table, Range + If-Range, continue exactly where each segment left.
+7.3 CRASH / QUIT / SLEEP RECOVERY
+  On launch: scan persisted downloads in state downloading/probing -> mark as
+  paused (interrupted) and offer [ Resume all ]. Never auto-start without a
+  setting.
+7.4 NETWORK CHANGE
+  NWPathMonitor unsatisfied -> auto pause with "Waiting for network";
+  satisfied -> auto resume (setting, default ON).
+7.5 COMPLETION
+  Verify size -> checksum -> rename -> keep quarantine -> Organizer moves to
+  category folder (if enabled) -> History entry -> notification -> mascot toast.
+7.6 FAILURE
+  Show a human reason ("Link expired", "Server blocked the request", "Disk full",
+  "Network lost") + [ Retry ] [ Copy link ] [ Remove ]. Keep the partial file until
+  the user removes it.
+7.7 CLIPBOARD WATCH
+  Poll NSPasteboard.changeCount (cheap), act only on valid http/https URLs that look
+  like files, show the toast once per URL, ignore URLs the user dismissed.
+
+--------------------------------------------------------------------------------
+8. BROWSER INTEGRATION (V2) + SECURITY
+--------------------------------------------------------------------------------
+Safari: Safari Web Extension bundled inside Tidy.app.
+Chrome / Edge / Brave / Firefox: WebExtension + Native Messaging host (a small
+helper binary shipped in Tidy.app that talks to the app over a local XPC / Unix
+socket).
+Do NOT run an open localhost HTTP server for this. If a local server is ever used,
+it MUST: bind to 127.0.0.1 only, require a random per-install token, validate the
+Origin header, and reject everything else.
+Extension behavior:
+  - Intercept download clicks (downloads API) and "Download with Tidy" context menu.
+  - Send: URL, referrer, user-agent, and cookies for that host ONLY when the user
+    has enabled "authenticated downloads". Keep them in memory only (R8).
+  - A per-site "never capture" list and a file-type filter.
+Video grabber (V3, optional): shell out to yt-dlp via Process, parse its real JSON
+output for formats, show a format picker, run it, and stream real progress. No DRM
+circumvention, show the responsibility notice (R9).
+
+--------------------------------------------------------------------------------
+9. EDGE CASES TO HANDLE
+--------------------------------------------------------------------------------
+- Server ignores Range / returns 200 on resume -> restart cleanly and tell the user.
+- Unknown size (chunked transfer) -> single connection, indeterminate bar, real
+  bytes counter, still resumable only if the server allows.
+- Redirect to a different host / expiring signed URLs -> keep the latest final URL;
+  if expired, ask the user to re-add the link (do not loop forever).
+- File name collision -> " (2)", never overwrite without confirmation.
+- Very large files (> 4 GB): use 64-bit offsets everywhere.
+- Destination on an external drive that disconnects -> pause with a clear message.
+- Many downloads from one host -> cap connections per host.
+- Corrupted segment table -> verify by size and restart only the broken segments.
+- Cloud placeholders / read-only folders -> clear permission error with a button to
+  choose another folder.
+- App Nap / background throttling -> use a background activity assertion while
+  downloads run.
+
+--------------------------------------------------------------------------------
+10. DESIGN & MASCOT
+--------------------------------------------------------------------------------
+- Same pastel Tidy style: rounded cards, soft shadows, pink primary, lavender and
+  mint accents, SF Rounded numerals for speed and size.
+- File icons use the category icon pack (Images/Docs/Video/Code/Archives...).
+- Chunk bar colors: pink, lavender, mint, peach, sky, repeated per segment.
+- Speed sparkline: smooth pastel line with soft area fill, real samples only.
+- Mascot states to add (animations can be made later as WebP):
+    downloading (folder catches falling files), download complete (folder eats the
+    file, confetti), paused (folder naps), failed (folder trips), empty (sleepy).
+- Micro-interactions: row slides in when added, bar pulses at 100%, check pops.
+- Accessibility: VoiceOver labels with real progress ("Downloading, 42 percent,
+  3 minutes left"), respect Reduce Motion, no color-only meaning.
+
+--------------------------------------------------------------------------------
+11. BUILD ORDER
+--------------------------------------------------------------------------------
+M1  Engine core: probe, single connection, write to .tidypart, pause/resume,
+    persisted state. Test against a real server that supports Range.
+M2  Segmented engine: N connections, dynamic re-splitting, retry/backoff,
+    crash-safe resume, disk-space checks.
+M3  UI: Downloads screen, Add sheet, rows with chunk bar + speed + ETA,
+    queue limits, completion -> Organizer + History.
+M4  Menu bar mini + animated tray + notifications + power assertion.
+M5  V2: clipboard watcher, batch add, speed limiter, scheduler, proxy, checksum,
+    duplicate guard.
+M6  Browser extensions (Safari first, then Chrome/Firefox) + native messaging.
+M7  V3 optional: yt-dlp video grabber, torrents, FTP/SFTP, Shortcuts/CLI.
+
+Acceptance tests (real machine):
+  - Download a 1 GB+ file with 8 segments: final SHA-256 equals the server's.
+  - Kill the app mid-download, relaunch, resume: file completes and hash matches.
+  - Turn Wi-Fi off/on: it pauses and resumes by itself.
+  - A server without Range support falls back to single connection with an
+    honest message.
+  - A malicious Content-Disposition like "../../evil.sh" is saved safely inside
+    the destination folder.
+  - Quarantine attribute is present on the finished file (xattr -l shows it).
+
+================================================================================
+END OF SPEC
+================================================================================

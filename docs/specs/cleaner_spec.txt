@@ -1,0 +1,582 @@
+================================================================================
+MAC CLEANER + ORGANIZER APP  -  WIREFRAME & WORKFLOW SPEC
+(working name: "Tidy" - rename freely)
+================================================================================
+
+NOTE TO THE AI BUILDING THIS
+Read the whole file before writing code. Build exactly what is described.
+Follow section 1 (NO DUMMY DATA) and section 2 (SAFETY) above everything else.
+
+--------------------------------------------------------------------------------
+1. NO DUMMY DATA RULES (HARD REQUIREMENTS)
+--------------------------------------------------------------------------------
+- Every number, file name, size, path, percentage and chart in the UI must come
+  from the real machine at runtime. Nothing hardcoded.
+- No placeholder lists, no "Lorem ipsum", no sample files, no fake apps, no
+  fake sizes like "12.4 GB" in code, previews, or previews-in-SwiftUI shipped
+  to the user.
+- Progress bars must reflect real scan progress (files scanned / estimated
+  total, or indeterminate spinner if total is unknown). Never fake-animate to
+  100%.
+- If a scan finds nothing, show a real EMPTY STATE ("Nothing to clean here"),
+  not invented results.
+- If permission is missing, show a PERMISSION STATE, not fake data.
+- SwiftUI #Preview blocks may use test fixtures, but fixtures must live in a
+  separate Preview target / #if DEBUG and never ship in release builds.
+- Disk totals come from URLResourceValues:
+  volumeTotalCapacityKey, volumeAvailableCapacityForImportantUsageKey.
+- File sizes come from URLResourceValues: totalFileAllocatedSizeKey
+  (fallback fileAllocatedSizeKey). Directory size = sum of children, computed
+  by real enumeration.
+
+--------------------------------------------------------------------------------
+2. SAFETY RULES (HARD REQUIREMENTS)
+--------------------------------------------------------------------------------
+Cleaning apps can destroy user data. These rules are not optional.
+
+S1. NEVER permanently delete by default. Cleaning = move to Trash using
+    FileManager.trashItem(at:resultingItemURL:). Offer "Delete permanently"
+    only as a separate, explicit, confirmed action in Settings (off by default).
+S2. NEVER touch these paths (hard blocklist, enforced in one central function
+    isPathProtected(url) that every delete/move path must call):
+      /System, /usr, /bin, /sbin, /private/var/db, /Library/Apple,
+      /Applications (apps are only removed through the Uninstaller flow),
+      ~/Documents, ~/Desktop, ~/Pictures, ~/Movies, ~/Music
+      (except where the user explicitly selects an item in Large Files or
+       Duplicates and confirms),
+      ~/Library/Keychains, ~/Library/Mail, ~/Library/Messages,
+      ~/Library/Application Support/AddressBook,
+      ~/Library/Mobile Documents (iCloud Drive),
+      any path inside a Photos library or Time Machine local snapshot.
+S3. Resolve symlinks before checking paths (use resolvingSymlinksInPath) so a
+    symlink cannot smuggle a protected path into a clean list.
+S4. Cache/log cleaning only targets the whitelist in section 6. Anything not on
+    the whitelist is never auto-selected.
+S5. Never clean files currently in use. Before cleaning a cache folder for an
+    app, check NSWorkspace.shared.runningApplications for that bundle ID. If
+    running, mark the row "App is open - quit it to clean" and skip it.
+S6. Every cleaning action shows a REVIEW screen first: what will be removed,
+    real sizes, real paths, checkbox per item. Nothing is deleted until the
+    user presses the confirm button.
+S7. After cleaning, show a real result: bytes actually freed (compare volume
+    free space before/after AND sum of trashed item sizes). Keep a local
+    history log so the user can see what was moved and restore it.
+S8. Provide "Undo last clean": restore items from Trash to original paths using
+    the saved resultingItemURL + original URL pairs. If Trash was emptied,
+    say so honestly.
+S9. Dry-run mode: Settings toggle that scans and reports but disables the
+    confirm button. Useful for testing.
+S10. Never send file names, paths or any scan data off the device. No network
+     calls for core features. No analytics that include file info.
+
+--------------------------------------------------------------------------------
+3. TECH STACK & ARCHITECTURE
+--------------------------------------------------------------------------------
+Platform:      macOS 13+ (Ventura or later)
+Language/UI:   Swift 5.9+, SwiftUI, with AppKit where needed
+App type:      Menu bar app (MenuBarExtra) + main window
+Distribution:  Notarized, Developer ID, NOT sandboxed.
+               (A cleaner cannot work inside the App Sandbox; it must read
+               ~/Library and other apps' caches. Mac App Store is therefore
+               not the distribution path. Use Hardened Runtime + notarization.)
+Permissions:   Full Disk Access (user-granted in System Settings).
+               Detect with a real probe: try to read a protected location such
+               as ~/Library/Safari or ~/Library/Mail directory listing; if it
+               fails with a permission error, show the permission screen.
+               Provide a button that opens:
+               x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles
+Concurrency:   Swift concurrency (async/await, TaskGroup). Scans run off the
+               main thread, publish progress to the UI via @MainActor
+               observable models.
+Storage:       SwiftData or SQLite (GRDB) for: clean history, organizer rules,
+               settings. Real data only.
+File watching: FSEvents (via DispatchSource or EonilFSEvents-style wrapper)
+               on ~/Downloads and ~/Desktop for the live organizer.
+Login item:    SMAppService.mainApp for "Launch at login".
+Notifications: UserNotifications, only for real events (e.g. "Downloads
+               organizer moved 3 files", "Disk is under X% free").
+
+Module layout:
+  App/            AppEntry, MenuBarExtra, window scenes
+  Core/
+    DiskInfo/     volume capacity + free space
+    Scanner/      generic async directory scanner with size calc + cancellation
+    Safety/       isPathProtected, blocklist, whitelist, running-app check
+    Cleaner/      trash operations, history log, undo
+    Permissions/  Full Disk Access probe + guidance
+  Features/
+    Dashboard/
+    SmartScan/
+    CacheCleaner/
+    LargeFiles/
+    Duplicates/
+    DownloadsOrganizer/
+    Uninstaller/
+    StartupItems/
+    History/
+    Settings/
+  Persistence/    models + store
+
+--------------------------------------------------------------------------------
+4. SCREEN MAP
+--------------------------------------------------------------------------------
+Main window sidebar (top to bottom):
+  1. Dashboard
+  2. Smart Scan
+  3. Cache & Junk
+  4. Large & Old Files
+  5. Duplicates
+  6. Downloads Organizer
+  7. App Uninstaller
+  8. Startup Items
+  9. History
+ 10. Settings
+
+Menu bar popover: mini dashboard (see 5.11).
+
+--------------------------------------------------------------------------------
+5. WIREFRAMES
+--------------------------------------------------------------------------------
+Legend:  [ Button ]   ( ) radio   [x] checkbox   {real value} = filled at runtime
+         ~~~ = progress   ... = more rows from real scan
+
+5.1 FIRST LAUNCH / PERMISSION SCREEN
+(shown only if the Full Disk Access probe fails)
+
++----------------------------------------------------------------------+
+|                                                                      |
+|                         Give Tidy access                             |
+|                                                                      |
+|  To find junk in all your apps, Tidy needs Full Disk Access.         |
+|  Everything stays on your Mac. Nothing is uploaded.                  |
+|                                                                      |
+|   1. Click "Open System Settings"                                    |
+|   2. Turn on the switch next to Tidy                                 |
+|   3. Come back here                                                  |
+|                                                                      |
+|            [ Open System Settings ]    [ I've done it - recheck ]    |
+|                                                                      |
+|  Status: {Access granted | Not granted yet}                          |
++----------------------------------------------------------------------+
+Behavior: "recheck" re-runs the probe. If granted, go to Dashboard. App is
+usable in limited mode without access (only user-owned folders), with a banner
+explaining what is skipped.
+
+5.2 DASHBOARD
+
++-----------+----------------------------------------------------------+
+| Dashboard |  Macintosh HD                                            |
+| Smart Scan|  {used} used of {total}      {free} free                 |
+| Cache...  |  [=========used==========-----free-----]                 |
+| Large...  |                                                          |
+| Duplicates|  +------------------+ +------------------+               |
+| Downloads |  | Reclaimable now  | | Downloads folder |               |
+| Uninstall |  | {sum of last     | | {count} files    |               |
+| Startup   |  |  scan or "Not    | | {size}           |               |
+| History   |  |  scanned yet"}   | | {n} unsorted     |               |
+| Settings  |  | [ Run Smart Scan]| | [ Organize now ] |               |
+|           |  +------------------+ +------------------+               |
+|           |                                                          |
+|           |  Last clean: {date, bytes freed} or "No cleans yet"      |
+|           |  Biggest folders in your home: (real top 5 by size)      |
+|           |   {name}  {size}                                         |
++-----------+----------------------------------------------------------+
+Rules: disk bar = real volume numbers. "Reclaimable now" is empty/"Not scanned
+yet" until a real scan has run. Top folders list computed by a real background
+scan (show spinner while computing, cache result with timestamp).
+
+5.3 SMART SCAN (one-button scan of everything safe)
+
+State A - idle
++----------------------------------------------------------------------+
+|  Smart Scan                                                          |
+|  Checks caches, logs, trash, old downloads, large files, leftovers.  |
+|                      [  Start Scan  ]                                |
++----------------------------------------------------------------------+
+
+State B - scanning
++----------------------------------------------------------------------+
+|  Scanning...  {current category}                                     |
+|  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  {files scanned} files               |
+|  Now looking at: {current path being enumerated}                     |
+|                                   [ Stop ]                           |
++----------------------------------------------------------------------+
+
+State C - results (REVIEW SCREEN, nothing deleted yet)
++----------------------------------------------------------------------+
+|  Found {total size} you can clean                                    |
+|                                                                      |
+|  [x] App caches            {size}   {n} items        [ Review > ]    |
+|  [x] System logs (user)    {size}   {n} items        [ Review > ]    |
+|  [x] Trash                 {size}   {n} items        [ Review > ]    |
+|  [ ] Old downloads (>30d)  {size}   {n} items        [ Review > ]    |
+|  [ ] Xcode junk            {size}   {n} items        [ Review > ]    |
+|  [ ] Large files (>500MB)  {size}   {n} items        [ Review > ]    |
+|  [ ] Orphaned app leftovers{size}   {n} items        [ Review > ]    |
+|  (only categories with real results are listed)                      |
+|                                                                      |
+|  Selected: {sum of checked} of {total}                               |
+|                    [ Move selected to Trash ]                        |
++----------------------------------------------------------------------+
+Rules: categories default-checked ONLY if they are in the safe whitelist
+(caches, user logs). Downloads, large files, leftovers default UNchecked.
+"Review >" opens the item-level list (5.4).
+Confirm button opens a final confirmation sheet:
+  "Move {n} items ({size}) to Trash? You can undo from History."
+  [ Cancel ]  [ Move to Trash ]
+
+State D - done
++----------------------------------------------------------------------+
+|  Done.  Freed {actual bytes freed}                                   |
+|  Free space: {before} -> {after}                                     |
+|  Skipped: {n} items ({reasons: app running / permission / in use})   |
+|            [ Undo ]   [ View details ]   [ Close ]                   |
++----------------------------------------------------------------------+
+
+5.4 ITEM REVIEW LIST (shared by all cleaning features)
+
++----------------------------------------------------------------------+
+| < Back     App caches                          Sort: (Size v)        |
+|----------------------------------------------------------------------|
+| [x] {App icon} {App name}                 {size}    [ Reveal in Finder]|
+|     {real path}                                                      |
+|     status: {Ready | App is open - skipped | No permission}           |
+| [x] ...                                                              |
+|----------------------------------------------------------------------|
+| [ Select all ] [ Select none ]       Selected {n} items, {size}      |
+|                              [ Move selected to Trash ]              |
++----------------------------------------------------------------------+
+Rules: icons via NSWorkspace.icon(forFile:) or app bundle lookup. Always show
+the real path. Reveal in Finder uses NSWorkspace.activateFileViewerSelecting.
+
+5.5 CACHE & JUNK (dedicated page, same engine as Smart Scan, per category)
+
++----------------------------------------------------------------------+
+|  Cache & Junk                                  [ Scan ]              |
+|----------------------------------------------------------------------|
+|  User app caches         {size}  >   (~/Library/Caches/*)            |
+|  Browser caches          {size}  >   (Safari, Chrome, Firefox, Edge) |
+|  User logs               {size}  >   (~/Library/Logs)                |
+|  Xcode derived data      {size}  >   (only if Xcode folders exist)   |
+|  Package manager caches  {size}  >   (npm, pip, Homebrew, gradle...) |
+|  iOS device backups      {size}  >   (listed, default unchecked)     |
+|  Trash                   {size}  >   (~/.Trash)                      |
+|----------------------------------------------------------------------|
+|  Rows appear only if the folder exists and has size > 0.             |
++----------------------------------------------------------------------+
+
+5.6 LARGE & OLD FILES
+
++----------------------------------------------------------------------+
+|  Large & Old Files                                                   |
+|  Min size: [ 100 MB v ]   Not opened in: [ 90 days v ]  [ Scan ]     |
+|  Scan locations: [x] Home  [x] External drives  [ ] Choose folder... |
+|----------------------------------------------------------------------|
+|  [ ] {file name}        {size}   last opened {date}  {kind}          |
+|      {path}                                [ Reveal ]                |
+|  ...  (sorted by size desc, real files only)                         |
+|----------------------------------------------------------------------|
+|  Selected {n}, {size}                  [ Move selected to Trash ]    |
++----------------------------------------------------------------------+
+Rules: default NOTHING selected. Last opened = contentAccessDateKey
+(fallback contentModificationDateKey and label it "modified"). Skip
+protected paths from section 2 unless user adds the folder manually via
+"Choose folder...". Never auto-select.
+
+5.7 DUPLICATES
+
++----------------------------------------------------------------------+
+|  Duplicates                       Scan in: {folder list}   [ Scan ]  |
+|----------------------------------------------------------------------|
+|  Group 1 - {n} copies, {size each}, wasting {size}                   |
+|    ( ) {path 1}   {date}                                             |
+|    (x) {path 2}   {date}   <- user picks which to REMOVE             |
+|    (x) {path 3}   {date}                                             |
+|  ...                                                                 |
+|  Always keep at least one copy per group (UI enforces this).         |
+|----------------------------------------------------------------------|
+|  Will remove {n} files, free {size}   [ Move selected to Trash ]     |
++----------------------------------------------------------------------+
+Algorithm (real, no shortcuts):
+  1. Enumerate files, group by exact byte size (skip size 0 and tiny < 4 KB
+     optionally).
+  2. For same-size groups, hash first 64 KB (fast filter).
+  3. For remaining matches, full-file SHA-256 (CryptoKit), streamed in chunks.
+  4. Group by full hash. Only groups with 2+ files are shown.
+Default selection: none. Suggest "keep oldest" / "keep newest" quick buttons.
+
+5.8 DOWNLOADS ORGANIZER (key feature)
+
+Two modes: manual "Organize now" and optional live "Auto-organize".
+
++----------------------------------------------------------------------+
+|  Downloads Organizer                                                 |
+|----------------------------------------------------------------------|
+|  Folder: ~/Downloads   [ Change... ]                                 |
+|  Found {n} loose files ({size})                                      |
+|                                                                      |
+|  Auto-organize new downloads:  [ OFF / ON ]                          |
+|  Organize files older than:    [ 0 days v ]  (wait before moving)    |
+|                                                                      |
+|  RULES (applied top to bottom, first match wins)                     |
+|  +----------------------------------------------------------------+  |
+|  | [x] Images     ext: jpg jpeg png gif heic webp svg   -> Images |  |
+|  | [x] Documents  ext: pdf doc docx txt rtf pages md    -> Docs   |  |
+|  | [x] Sheets     ext: xls xlsx csv numbers             -> Sheets |  |
+|  | [x] Slides     ext: ppt pptx key                     -> Slides |  |
+|  | [x] Archives   ext: zip rar 7z tar gz                -> Archives|  |
+|  | [x] Installers ext: dmg pkg                          -> Install |  |
+|  | [x] Video      ext: mp4 mov mkv avi                  -> Video  |  |
+|  | [x] Audio      ext: mp3 wav m4a flac                 -> Audio  |  |
+|  | [x] Code       ext: py js ts swift c cpp java json   -> Code   |  |
+|  | [ ] Everything else                                  -> Other  |  |
+|  +----------------------------------------------------------------+  |
+|  [ + Add rule ]   (name, match by: extension / name contains /       |
+|                     source app / size / age -> destination folder)   |
+|                                                                      |
+|  Destination root: ~/Downloads/Sorted  [ Change... ]                 |
+|                                                                      |
+|  [ Preview what will move ]                                          |
++----------------------------------------------------------------------+
+
+Preview screen (REQUIRED before first run and available always):
++----------------------------------------------------------------------+
+|  Preview - {n} files will move                                       |
+|  {file name}      {size}     -> Sorted/Images/                       |
+|  {file name}      {size}     -> Sorted/Documents/                    |
+|  ...                                                                 |
+|  Skipped: {n} (still downloading, hidden, folders, already sorted)   |
+|            [ Cancel ]   [ Organize ]                                 |
++----------------------------------------------------------------------+
+
+Rules for the organizer engine:
+- Moves, not copies, within the same volume (FileManager.moveItem) so it is
+  instant. If destination is on another volume, copy + verify + trash source.
+- Skip: files ending .download .crdownload .part .tmp (in-progress), dotfiles,
+  folders (unless a rule opts in), files modified in the last 10 seconds.
+- Name collision: append " (2)", " (3)"... never overwrite.
+- Optional extra: group by month (Sorted/Images/2026-10/). Toggle in settings.
+- Use quarantine attribute untouched (do not strip com.apple.quarantine).
+- Every move is logged (original path, new path, timestamp) so "Undo last
+  organize" can move files back.
+- Optional "Source" smart rule: read kMDItemWhereFroms (via MDItem or
+  getxattr com.apple.metadata:kMDItemWhereFroms) to route by website/domain,
+  e.g. files from a given domain go to a named folder. Real metadata only.
+- Live mode uses FSEvents on the watched folder, debounced (wait until file
+  size stops changing for ~3 seconds), then applies rules, then posts a
+  real notification: "Moved {file} to {folder}". Provide per-notification
+  Undo if feasible.
+- Also offer "Old downloads" cleanup in the same screen: list files older than
+  N days (user-chosen) for Trash. Default off. Review first.
+
+5.9 APP UNINSTALLER
+
++----------------------------------------------------------------------+
+|  App Uninstaller                    Search: [__________]  Sort: Size |
+|----------------------------------------------------------------------|
+|  {icon} {App name}      {app size}   + leftovers {size}   last used  |
+|  ...  (real list from /Applications and ~/Applications)              |
+|----------------------------------------------------------------------|
+|  Select an app -> detail:                                            |
+|    App bundle:   {path}                       {size}                 |
+|    Leftovers found (real, matched by bundle ID):                     |
+|    [x] ~/Library/Caches/{bundle id}                    {size}        |
+|    [x] ~/Library/Preferences/{bundle id}.plist         {size}        |
+|    [x] ~/Library/Application Support/{app}             {size}        |
+|    [x] ~/Library/Containers/{bundle id}                {size}        |
+|    [x] ~/Library/Saved Application State/{bundle id}.savedState        |
+|    [x] ~/Library/Logs/{app}                            {size}        |
+|                       [ Move app + selected to Trash ]               |
++----------------------------------------------------------------------+
+Rules: skip apps in /System/Applications and any Apple-signed app. Do not
+uninstall the cleaner itself. App must not be running (offer to quit it).
+Leftover matching is by exact bundle ID, never fuzzy name guessing on its own.
+
+5.10 STARTUP ITEMS
+
++----------------------------------------------------------------------+
+|  Startup Items                                                       |
+|  Login items and background agents (real, read from the system)      |
+|  {icon} {name}   {developer}   {type: Login item | Agent}   [ ON/OFF]|
+|  ...                                                                 |
++----------------------------------------------------------------------+
+Rules: list user LaunchAgents (~/Library/LaunchAgents) and login items via
+the supported APIs; toggling only changes what the OS allows. Show a note
+when an item must be managed in System Settings > General > Login Items.
+Do not touch system-level daemons.
+
+5.11 MENU BAR POPOVER
+
++-----------------------------------+
+|  Tidy                             |
+|  Free: {free} of {total}          |
+|  [=========------]                |
+|  Downloads: {n} loose files       |
+|  [ Organize Downloads ]           |
+|  [ Quick Scan ]                   |
+|  [ Open Tidy ]      [ Settings ]  |
++-----------------------------------+
+Menu bar icon can optionally show free space text ({free} GB). Real value only,
+refresh on volume change notifications and on a low-frequency timer.
+
+5.12 HISTORY
+
++----------------------------------------------------------------------+
+|  History                                                             |
+|  {date/time}  Smart Scan clean     freed {bytes}    {n} items [Undo] |
+|  {date/time}  Downloads organized  {n} files moved               [Undo]|
+|  ...  (real log entries; "No activity yet" if empty)                 |
+|  Click a row -> list of items with original paths and current state  |
+|  (In Trash / Restored / Gone - Trash emptied).                       |
++----------------------------------------------------------------------+
+
+5.13 SETTINGS
+
++----------------------------------------------------------------------+
+|  General:  [x] Launch at login   [x] Show free space in menu bar     |
+|  Cleaning: [ ] Dry-run mode (scan only, disable cleaning)            |
+|            [ ] Allow permanent delete (off by default, extra confirm)|
+|            Protected folders: {list}  [ + Add folder to protect ]    |
+|  Downloads: watched folder, destination, auto-organize toggle        |
+|  Notifications: [x] Organizer activity  [x] Low disk space (<{n}%)   |
+|  Permissions: Full Disk Access status {Granted | Not granted} [ Fix ]|
+|  About: version, [ Export history ]   [ Reset all settings ]         |
++----------------------------------------------------------------------+
+User-added protected folders are respected by every scanner via
+isPathProtected.
+
+--------------------------------------------------------------------------------
+6. CLEANING WHITELIST (REAL LOCATIONS)
+--------------------------------------------------------------------------------
+Only these are eligible for auto-selection in Smart Scan:
+  ~/Library/Caches/*                  (per-app folders, skip running apps)
+  ~/Library/Logs/*
+  ~/.Trash/*
+  Browser caches (only when browser not running):
+    Safari:   ~/Library/Caches/com.apple.Safari
+    Chrome:   ~/Library/Caches/Google/Chrome
+    Firefox:  ~/Library/Caches/Firefox
+    Edge:     ~/Library/Caches/Microsoft Edge
+  Xcode (only if present):
+    ~/Library/Developer/Xcode/DerivedData
+    ~/Library/Developer/Xcode/Archives   (list only, unchecked)
+    ~/Library/Developer/Xcode/iOS DeviceSupport (unchecked)
+    ~/Library/Developer/CoreSimulator/Caches
+  Dev caches (only if present, unchecked by default):
+    ~/.npm/_cacache, ~/Library/Caches/pip, ~/Library/Caches/Homebrew,
+    ~/.gradle/caches, ~/.cache
+Listed but ALWAYS unchecked and clearly labeled:
+  ~/Library/Application Support/MobileSync/Backup (iPhone backups)
+  Old Downloads, large files, duplicates, app leftovers.
+Never touched: everything in the section 2 blocklist.
+
+--------------------------------------------------------------------------------
+7. WORKFLOWS
+--------------------------------------------------------------------------------
+7.1 APP START
+  Launch -> load settings + history from local store
+         -> run Full Disk Access probe
+              granted     -> Dashboard
+              not granted -> Permission screen (limited mode allowed)
+         -> read real disk capacity, render Dashboard
+         -> kick off background "top folders" size computation
+         -> if auto-organize ON, start FSEvents watcher
+
+7.2 SMART SCAN -> CLEAN
+  User taps Start Scan
+   -> for each category in whitelist order:
+        enumerate real folders, compute sizes, skip protected + running apps
+        stream progress to UI (files scanned, current path)
+   -> show Results (Review screen). Default-check only whitelist categories.
+   -> user opens "Review >" to inspect/uncheck items
+   -> user taps "Move selected to Trash"
+   -> confirmation sheet (items, size)
+   -> for each item: isPathProtected? running app? -> else trashItem
+        record (originalURL, resultingItemURL, size) in history
+   -> measure free space before/after, show Done screen with real numbers
+   -> Undo available from Done screen and History
+
+7.3 DOWNLOADS ORGANIZE (MANUAL)
+  Open Downloads Organizer -> enumerate real files in watched folder
+   -> apply rules in order, first match wins -> build move plan
+   -> Preview screen (user can edit rules, exclude files)
+   -> user taps Organize -> perform moves with collision handling
+   -> log every move -> show summary "Moved {n} files" + [ Undo ]
+
+7.4 DOWNLOADS ORGANIZE (AUTO / LIVE)
+  FSEvents fires on new item in watched folder
+   -> debounce until file stops growing and is not an in-progress extension
+   -> match rule -> move -> log -> notify "Moved {file} to {folder}"
+   -> if no rule matches, leave the file alone (or Other if enabled)
+
+7.5 LARGE FILES / DUPLICATES
+  User sets filters -> Scan -> real results list (nothing preselected)
+   -> user ticks items -> confirm -> trashItem -> log -> summary
+
+7.6 UNINSTALL APP
+  Select app -> find leftovers by bundle ID -> list with sizes (checked)
+   -> if app running, offer Quit -> confirm -> trash app + selected leftovers
+   -> log -> summary
+
+7.7 UNDO
+  History row -> Undo -> for each logged item:
+     resultingItemURL still exists in Trash -> move back to originalURL
+     (if originalURL taken, restore with " (restored)" suffix)
+     else mark "Not recoverable - Trash was emptied"
+   -> report real count restored/failed
+
+--------------------------------------------------------------------------------
+8. EDGE CASES TO HANDLE
+--------------------------------------------------------------------------------
+- Permission denied on a path: skip it, count it, show "{n} items skipped (no
+  permission)". Never crash, never pretend it was scanned.
+- Scan cancelled by user: stop cleanly, show partial real results, label them
+  "Partial scan".
+- Disk almost full: trashing does not free space until Trash is emptied. If
+  user wants immediate space, offer "Empty Trash" as a separate real action
+  with its own confirmation, and report real free-space change.
+- Files with huge counts (node_modules, caches): enumerate lazily with
+  FileManager.enumerator and skip package contents where appropriate. Keep UI
+  responsive (batch UI updates, e.g. every 200ms).
+- External volumes: label clearly, do not clean ejected/readonly volumes.
+- Cloud placeholders (iCloud Drive evicted files): sizes may be 0 on disk;
+  never treat them as junk, never trigger a download during scan.
+- Time Machine local snapshots, APFS purgeable space: display purgeable space
+  as info only ("macOS manages this"), do not try to delete it.
+- Localization: use real byte formatting via ByteCountFormatter.
+
+--------------------------------------------------------------------------------
+9. DESIGN GUIDELINES
+--------------------------------------------------------------------------------
+- Native macOS look: SF Symbols, system fonts, vibrancy sidebar, light/dark mode.
+- One clear primary button per screen.
+- Calm colors. Use red only for destructive confirmations.
+- Always show size next to every item, always show the path on hover or in the
+  row subtitle.
+- Plain language: "Move to Trash", not "Purge". Say what will happen and what
+  can be undone.
+- Keyboard shortcuts: Cmd+R rescan, Cmd+Delete on selection triggers the
+  review/confirm flow (never deletes instantly).
+- Accessibility: VoiceOver labels on every control, no color-only meaning.
+
+--------------------------------------------------------------------------------
+10. BUILD ORDER (SUGGESTED MILESTONES)
+--------------------------------------------------------------------------------
+M1  Project setup, non-sandboxed, Hardened Runtime, Full Disk Access probe and
+    permission screen, disk info on Dashboard (real numbers).
+M2  Core: async scanner, size calculation, isPathProtected, running-app check,
+    trashItem wrapper, history log + undo.
+M3  Cache & Junk (whitelist categories) + shared Review screen + clean flow.
+M4  Downloads Organizer: rules engine, preview, manual organize, undo.
+M5  Live organizer with FSEvents + notifications + menu bar popover.
+M6  Large & Old Files, Duplicates.
+M7  App Uninstaller, Startup Items.
+M8  Settings, polish, empty/permission/error states, notarization.
+
+Acceptance test for every milestone: run on a real Mac, confirm that every
+number shown matches Finder "Get Info" / System Settings storage within
+reasonable tolerance, and that nothing outside the whitelist is ever touched.
+
+================================================================================
+END OF SPEC
+================================================================================
